@@ -19,10 +19,10 @@ Requirements: macOS, Node.js 22.13+, Google Chrome, and an Anthropic API key.
 npm install
 echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env   # from platform.claude.com → Settings → API Keys
 npm run login    # Chrome opens; sign in to LinkedIn yourself (incl. 2FA). Done once.
-npm start        # asks your name, age and location, then runs until Ctrl+C
+npm start        # runs until Ctrl+C
 ```
 
-On start, the bot asks for your name, age and where you live. Press Enter to keep the saved answers. These are the only facts about you it will share; for anything else, it deflects or says it will get back to them. `npm start` runs under `caffeinate`, so the Mac stays awake while the bot runs. Keep the Chrome window open.
+`npm start` runs under `caffeinate`, so the Mac stays awake while the bot runs. Keep the Chrome window open.
 
 ## How replies work
 
@@ -52,12 +52,11 @@ src/watch/    npm start: the main loop (one Chrome, one tab for invitations, one
               and the realtime listener (realtime.ts)
 src/accept/   accepting invitations
 src/reply/    reading the inbox (reply.ts), writing the reply with Claude (draft.ts)
-src/profile/  the name/age/location prompt
 src/login/    one-time manual login
 src/shared/   browser, config, database, helpers
 ```
 
-All state lives outside the repo in `~/.linkedin-bot/`: the Chrome profile, `bot.db`, `profile.json` and failure screenshots. No messages or personal data are stored in the repository.
+All state lives outside the repo in `~/.linkedin-bot/`: the Chrome profile, `bot.db` and failure screenshots. No messages or personal data are stored in the repository.
 
 ## What it cannot do yet
 
@@ -66,7 +65,7 @@ All state lives outside the repo in `~/.linkedin-bot/`: the Chrome profile, `bot
 - **Attachments other than images:** it cannot read the contents of PDFs, documents, videos or voice messages. It sees only their type and name.
 - **Links:** it cannot open them.
 - **Memory across conversations:** it has none, and it only sees the latest 30 messages of a thread.
-- **Facts about you:** it knows only your name, age and location, and nothing about your work or schedule.
+- **Facts about you:** it knows only your name, taken from your own LinkedIn messages. It deflects questions about your age, location, work or schedule.
 - **Running in the background:** it needs the Mac awake and logged in, with a visible Chrome window. A server or headless setup would need more work against LinkedIn's bot detection.
 - **ToS risk:** LinkedIn's User Agreement prohibits automation, and the account may be restricted.
 

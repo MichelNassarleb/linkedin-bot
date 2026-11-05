@@ -1,4 +1,4 @@
-// The bot: asks for your profile, then keeps one Chrome window open and, until stopped,
+// The bot: keeps one Chrome window open and, until stopped,
 // accepts new invitations and answers new messages. LinkedIn's realtime channel tells it
 // when something arrives, so it acts within seconds; slower timed checks catch anything missed.
 // Usage: npm start    (Ctrl+C to stop)
@@ -6,7 +6,6 @@ import { existsSync } from "node:fs";
 import type { Page } from "playwright";
 import { acceptPending } from "../accept/accept.js";
 import { acceptConfig } from "../accept/config.js";
-import { askProfile } from "../profile/profile.js";
 import { replyConfig } from "../reply/config.js";
 import { answerMessages, watchInbox } from "../reply/reply.js";
 import { firstPage, openBrowser } from "../shared/browser.js";
@@ -31,8 +30,6 @@ if (existsSync(config.stopFile)) {
   console.error(`Paused: ${config.stopFile} exists. Check LinkedIn in the bot's Chrome, then delete it to resume.`);
   process.exit(1);
 }
-
-const profile = await askProfile();
 
 if (!acquireLock()) {
   console.error("Another bot process is already using the Chrome profile.");
@@ -116,7 +113,7 @@ function onEvent(kind: RealtimeKind): void {
 await onRealtimeEvent(messagesPage, onEvent);
 await onRealtimeEvent(invitesPage, onEvent);
 
-log(`Running as ${profile.name}. Waiting for invitations and messages; press Ctrl+C to stop.`);
+log("Running. Waiting for invitations and messages; press Ctrl+C to stop.");
 
 let nextAcceptAt = 0;
 let nextReplyAt = 0;
@@ -134,7 +131,7 @@ while (!stopping) {
     lastReplyCheckAt = Date.now();
     let recheckAt: number | null = null;
     const ok = await check(messagesPage, "reply", async () => {
-      const result = await answerMessages(messagesPage, inbox, runId, profile);
+      const result = await answerMessages(messagesPage, inbox, runId);
       recheckAt = result.recheckAt;
       return result.replied;
     });

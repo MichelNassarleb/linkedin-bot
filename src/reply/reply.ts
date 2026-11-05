@@ -4,7 +4,6 @@
 import { existsSync } from "node:fs";
 import Anthropic from "@anthropic-ai/sdk";
 import type { Page } from "playwright";
-import type { Profile } from "../profile/profile.js";
 import { config } from "../shared/config.js";
 import { replyConfig } from "./config.js";
 import { isMessageHandled, recordMessage, repliesSince } from "./db.js";
@@ -264,6 +263,12 @@ function threadMessages(inbox: Inbox, threadId: string): Message[] {
     .sort((a, b) => a.deliveredAt - b.deliveredAt);
 }
 
+// Your name as LinkedIn shows it on your own messages, or "" if none were loaded.
+function myName(inbox: Inbox): string {
+  for (const m of inbox.messages.values()) if (m.senderUrn === inbox.me && m.senderName) return m.senderName;
+  return "";
+}
+
 // Reasons decided from the conversation data alone; these threads are never opened.
 function listSkipReason(c: Conversation): string | null {
   if (c.groupChat) return "group chat";
@@ -401,7 +406,7 @@ export type AnswerResult = {
 
 // Refreshes the inbox data and answers what needs an answer. The page is only reloaded on the
 // first check, or when the data cannot be fetched from the open tab.
-export async function answerMessages(page: Page, inbox: Inbox, runId: number, profile: Profile): Promise<AnswerResult> {
+export async function answerMessages(page: Page, inbox: Inbox, runId: number): Promise<AnswerResult> {
   let recheckAt: number | null = null;
   const remainingToday = replyConfig.maxPerDay - repliesSince(startOfToday());
   if (remainingToday <= 0) {
@@ -465,7 +470,7 @@ export async function answerMessages(page: Page, inbox: Inbox, runId: number, pr
     const thread = await readThread(page, inbox, c, name);
     if (thread && !thread.lastFromMe && !isMessageHandled(thread.lastKey)) {
       try {
-        const draft = await draftReply(profile, name, thread.lines);
+        const draft = await draftReply(myName(inbox), name, thread.lines);
         await sendReply(page, draft.text);
         await assertUsable(page);
         recordMessage(runId, thread.lastKey, c.threadId, name || null, "replied", draft.reason, draft.text);
