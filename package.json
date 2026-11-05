@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "LinkedIn bot that accepts connection requests and answers messages with Claude, via Playwright",
   "scripts": {
-    "start": "caffeinate -i tsx src/watch/watch.ts",
+    "start": "caffeinate -i node --disable-warning=ExperimentalWarning --import tsx src/watch/watch.ts",
     "login": "tsx src/login/login.ts",
     "typecheck": "tsc --noEmit"
   },
