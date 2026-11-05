@@ -157,11 +157,15 @@ function findMessages(node: unknown, found: Message[] = [], depth = 0): Message[
   return found;
 }
 
+// A data request the page made, kept so the bot can repeat it instead of reloading the page.
+type Replay = { url: string; headers: Record<string, string> };
+
 export type Inbox = {
   conversations: Map<string, Conversation>;
   // Your own profile URN, taken from the inbox query's mailboxUrn.
   me: string | null;
   messages: Map<string, Message>;
+  replays: { conversations: Replay | null; messagesByThread: Map<string, Replay> };
 };
 
 const queryIdOf = (url: URL) => url.searchParams.get("queryId") ?? "";
@@ -170,11 +174,39 @@ const isMessagingQuery = (url: URL, query: string) =>
 
 // Collects the inbox data LinkedIn loads into this page. Attach once, before the first check.
 export function watchInbox(page: Page): Inbox {
-  const inbox: Inbox = { conversations: new Map(), me: null, messages: new Map() };
-  page.on("request", (request) => {
+  const inbox: Inbox = {
+    conversations: new Map(),
+    me: null,
+    messages: new Map(),
+    replays: { conversations: null, messagesByThread: new Map() },
+  };
+  page.on("request", async (request) => {
     const url = new URL(request.url());
-    if (!isMessagingQuery(url, CONVERSATIONS_QUERY)) return;
-    inbox.me ??= decodeURIComponent(url.search).match(/mailboxUrn:(urn:li:fsd_profile:[A-Za-z0-9_-]+)/)?.[1] ?? null;
+    const isConversations = isMessagingQuery(url, CONVERSATIONS_QUERY);
+    if (!isConversations && !isMessagingQuery(url, MESSAGES_QUERY)) return;
+    const decoded = decodeURIComponent(url.search);
+    if (isConversations) {
+      inbox.me ??= decoded.match(/mailboxUrn:(urn:li:fsd_profile:[A-Za-z0-9_-]+)/)?.[1] ?? null;
+    }
+
+    // Keep first-page requests for repeating; requests for older pages carry a cursor.
+    if (/cursor|before/i.test(url.searchParams.get("variables") ?? "")) return;
+    let headers: Record<string, string>;
+    try {
+      // Cookies come from the browser context when the request is repeated.
+      headers = Object.fromEntries(
+        Object.entries(await request.allHeaders()).filter(([name]) => !name.startsWith(":") && name !== "cookie"),
+      );
+    } catch {
+      return;
+    }
+    const replay = { url: request.url(), headers };
+    if (isConversations) {
+      inbox.replays.conversations = replay;
+    } else {
+      const threadId = decoded.match(/msg_conversation:\(urn:li:fsd_profile:[^,]+,([^)]+)\)/)?.[1];
+      if (threadId) inbox.replays.messagesByThread.set(threadId, replay);
+    }
   });
   page.on("response", async (response) => {
     const url = new URL(response.url());
@@ -192,6 +224,40 @@ export function watchInbox(page: Page): Inbox {
   return inbox;
 }
 
+async function repeatRequest(page: Page, replay: Replay): Promise<unknown> {
+  try {
+    const response = await page.request.get(replay.url, { headers: replay.headers, timeout: 15_000 });
+    return response.ok() ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Fetches the conversation list again from inside the open tab, without reloading the page.
+// Returns false when that is not possible, so the caller reloads instead.
+async function refreshInbox(page: Page, inbox: Inbox): Promise<boolean> {
+  const replay = inbox.replays.conversations;
+  // A thread must be open on screen, since replies are typed into it.
+  if (!replay || !threadIdFrom(page.url())) return false;
+  const body = await repeatRequest(page, replay);
+  const found = findConversations(body);
+  if (found.length === 0) {
+    log("Could not refresh the inbox in place; reloading the page.");
+    return false;
+  }
+  inbox.conversations.clear();
+  for (const c of found) inbox.conversations.set(c.threadId, c);
+  for (const m of findMessages(body)) inbox.messages.set(m.key, m);
+  return true;
+}
+
+// Fetches the latest messages of a thread that is already open, without reloading the page.
+async function refreshThread(page: Page, inbox: Inbox, threadId: string): Promise<void> {
+  const replay = inbox.replays.messagesByThread.get(threadId);
+  if (!replay) return;
+  for (const m of findMessages(await repeatRequest(page, replay))) inbox.messages.set(m.key, m);
+}
+
 function threadMessages(inbox: Inbox, threadId: string): Message[] {
   return [...inbox.messages.values()]
     .filter((m) => m.conversationUrn.includes(threadId))
@@ -206,10 +272,13 @@ function listSkipReason(c: Conversation): string | null {
   return null;
 }
 
-async function openThread(page: Page, c: Conversation): Promise<void> {
-  if (threadIdFrom(page.url()) !== c.threadId) {
-    await page.goto(c.url, { waitUntil: "domcontentloaded" });
+async function openThread(page: Page, inbox: Inbox, c: Conversation): Promise<void> {
+  if (threadIdFrom(page.url()) === c.threadId) {
+    // Already on screen: new messages appear in it live; only the data needs fetching.
+    await refreshThread(page, inbox, c.threadId);
+    return;
   }
+  await page.goto(c.url, { waitUntil: "domcontentloaded" });
   await page.locator(SEL.messageList).waitFor({ state: "visible", timeout: 15_000 });
   await sleep(randomInt(1_000, 2_000));
 }
@@ -330,7 +399,8 @@ export type AnswerResult = {
   recheckAt: number | null;
 };
 
-// Reloads the inbox and answers what needs an answer.
+// Refreshes the inbox data and answers what needs an answer. The page is only reloaded on the
+// first check, or when the data cannot be fetched from the open tab.
 export async function answerMessages(page: Page, inbox: Inbox, runId: number, profile: Profile): Promise<AnswerResult> {
   let recheckAt: number | null = null;
   const remainingToday = replyConfig.maxPerDay - repliesSince(startOfToday());
@@ -341,19 +411,22 @@ export async function answerMessages(page: Page, inbox: Inbox, runId: number, pr
   const limit = Math.min(replyConfig.maxPerCheck, remainingToday);
 
   const { conversations } = inbox;
-  conversations.clear();
-  await page.goto(replyConfig.messagingUrl, { waitUntil: "domcontentloaded" });
-  await assertUsable(page);
-  const deadline = Date.now() + 20_000;
-  while (conversations.size === 0 && Date.now() < deadline) await sleep(300);
-  if (conversations.size === 0) throw new Error(`No ${CONVERSATIONS_QUERY} data seen; LinkedIn may have changed its inbox API.`);
-  // LinkedIn opens the newest thread on its own; let that settle.
-  await sleep(randomInt(1_500, 2_500));
+  if (!(await refreshInbox(page, inbox))) {
+    conversations.clear();
+    await page.goto(replyConfig.messagingUrl, { waitUntil: "domcontentloaded" });
+    await assertUsable(page);
+    const deadline = Date.now() + 20_000;
+    while (conversations.size === 0 && Date.now() < deadline) await sleep(300);
+    if (conversations.size === 0) throw new Error(`No ${CONVERSATIONS_QUERY} data seen; LinkedIn may have changed its inbox API.`);
+    // LinkedIn opens the newest thread on its own; let that settle.
+    await sleep(randomInt(1_500, 2_500));
+  }
 
-  // Unread threads, plus the thread LinkedIn opened on its own (the newest one), even if it
-  // is read: the bot answers it too when its last message is from the other person.
-  const autoOpenedId = threadIdFrom(page.url());
-  const candidates = [...conversations.values()].filter((c) => isUnread(c) || c.threadId === autoOpenedId);
+  // Unread threads, plus the thread open on screen even if it is read: after a reload that is
+  // the newest one, which LinkedIn opens on its own, and later the last one the bot answered.
+  // New messages in the open thread are marked read as they arrive, so they need this rule.
+  const openId = threadIdFrom(page.url());
+  const candidates = [...conversations.values()].filter((c) => isUnread(c) || c.threadId === openId);
 
   let replied = 0;
   for (const c of candidates) {
@@ -377,7 +450,7 @@ export async function answerMessages(page: Page, inbox: Inbox, runId: number, pr
     }
 
     try {
-      await openThread(page, c);
+      await openThread(page, inbox, c);
     } catch {
       // Not recorded, so the next check tries again.
       await assertUsable(page);
