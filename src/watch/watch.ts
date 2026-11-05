@@ -1,5 +1,6 @@
 // The bot: asks for your profile, then keeps one Chrome window open and, until stopped,
-// accepts new invitations (every 30-60 s) and answers messages (every 10-20 s).
+// accepts new invitations and answers new messages. LinkedIn's realtime channel tells it
+// when something arrives, so it acts within seconds; slower timed checks catch anything missed.
 // Usage: npm start    (Ctrl+C to stop)
 import { existsSync } from "node:fs";
 import type { Page } from "playwright";
@@ -12,9 +13,13 @@ import { firstPage, openBrowser } from "../shared/browser.js";
 import { config } from "../shared/config.js";
 import { finishRun, startRun } from "../shared/db.js";
 import { acquireLock, HaltError, log, randomInt, releaseLock, screenshot, sleep } from "../shared/runtime.js";
+import { onRealtimeEvent, type RealtimeKind } from "./realtime.js";
 
 // Give up after this many failed checks in a row; single failures (a slow page) are retried.
 const MAX_CONSECUTIVE_ERRORS = 5;
+// Bursts of realtime events (including ones caused by the bot's own replies) start at most
+// one inbox check per this many milliseconds.
+const MIN_REPLY_CHECK_GAP_MS = 4_000;
 
 const secondsBetween = (min: number, max: number) => randomInt(min * 1_000, max * 1_000);
 
@@ -88,19 +93,64 @@ async function check(page: Page, name: string, work: () => Promise<number>): Pro
   }
 }
 
-log(`Running as ${profile.name}. Watching invitations and messages; press Ctrl+C to stop.`);
+// Set by realtime events; a check runs as soon as the loop is free.
+const due = { accept: true, reply: true };
+let wakeUp: (() => void) | null = null;
+
+function waitUntil(time: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, time - Date.now()));
+    wakeUp = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+  });
+}
+
+function onEvent(kind: RealtimeKind): void {
+  const key = kind === "message" ? "reply" : "accept";
+  if (!due[key]) log(kind === "message" ? "Message activity; checking the inbox." : "Network activity; checking invitations.");
+  due[key] = true;
+  wakeUp?.();
+}
+await onRealtimeEvent(messagesPage, onEvent);
+await onRealtimeEvent(invitesPage, onEvent);
+
+log(`Running as ${profile.name}. Waiting for invitations and messages; press Ctrl+C to stop.`);
 
 let nextAcceptAt = 0;
+let nextReplyAt = 0;
+let lastReplyCheckAt = 0;
 while (!stopping) {
   if (existsSync(config.stopFile)) {
     log(`${config.stopFile} appeared.`);
     await shutdown("stopped");
     break;
   }
-  if (Date.now() >= nextAcceptAt) {
+
+  // Messages first: a reply is the more time-sensitive of the two.
+  if ((due.reply && Date.now() - lastReplyCheckAt >= MIN_REPLY_CHECK_GAP_MS) || Date.now() >= nextReplyAt) {
+    due.reply = false;
+    lastReplyCheckAt = Date.now();
+    let recheckAt: number | null = null;
+    const ok = await check(messagesPage, "reply", async () => {
+      const result = await answerMessages(messagesPage, inbox, runId, profile);
+      recheckAt = result.recheckAt;
+      return result.replied;
+    });
+    if (!ok) break;
+    const fallback = Date.now() + secondsBetween(replyConfig.checkEveryMinSec, replyConfig.checkEveryMaxSec);
+    nextReplyAt = Math.min(fallback, recheckAt ?? Infinity);
+  }
+
+  if (due.accept || Date.now() >= nextAcceptAt) {
+    due.accept = false;
     if (!(await check(invitesPage, "accept", () => acceptPending(invitesPage, runId)))) break;
     nextAcceptAt = Date.now() + secondsBetween(acceptConfig.checkEveryMinSec, acceptConfig.checkEveryMaxSec);
   }
-  if (!(await check(messagesPage, "reply", () => answerMessages(messagesPage, inbox, runId, profile)))) break;
-  await sleep(secondsBetween(replyConfig.checkEveryMinSec, replyConfig.checkEveryMaxSec));
+
+  let next = Math.min(nextAcceptAt, nextReplyAt);
+  if (due.accept) next = Date.now();
+  if (due.reply) next = Math.min(next, lastReplyCheckAt + MIN_REPLY_CHECK_GAP_MS);
+  await waitUntil(next);
 }

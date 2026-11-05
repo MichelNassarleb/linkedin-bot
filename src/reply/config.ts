@@ -9,9 +9,10 @@ export const replyConfig = {
   // Wait until the other person has been quiet this long, so several messages
   // sent in a row get one answer.
   quietSec: num("REPLY_QUIET_SEC", 12),
-  // Seconds between inbox checks; each wait is picked at random in this range.
-  checkEveryMinSec: num("REPLY_CHECK_MIN_SEC", 10),
-  checkEveryMaxSec: num("REPLY_CHECK_MAX_SEC", 20),
+  // New messages trigger a check right away through LinkedIn's realtime channel. These
+  // seconds bound the fallback checks in between, in case an event is missed.
+  checkEveryMinSec: num("REPLY_CHECK_MIN_SEC", 30),
+  checkEveryMaxSec: num("REPLY_CHECK_MAX_SEC", 60),
   maxPerCheck: num("MAX_REPLIES_PER_CHECK", 10),
   maxPerDay: num("MAX_REPLIES_PER_DAY", 300),
 };

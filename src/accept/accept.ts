@@ -33,7 +33,7 @@ export async function acceptPending(page: Page, runId: number): Promise<number> 
   await page
     .getByRole("button", { name: ACCEPT_BUTTON })
     .first()
-    .waitFor({ state: "visible", timeout: 6_000 })
+    .waitFor({ state: "visible", timeout: 4_000 })
     .catch(() => {});
 
   let accepted = 0;

@@ -324,12 +324,19 @@ async function markUnread(page: Page, label: string): Promise<void> {
   }
 }
 
-// Reloads the inbox and answers what needs an answer. Returns the number of replies sent.
-export async function answerMessages(page: Page, inbox: Inbox, runId: number, profile: Profile): Promise<number> {
+export type AnswerResult = {
+  replied: number;
+  // When a burst of messages may still be coming in, the time to check that thread again.
+  recheckAt: number | null;
+};
+
+// Reloads the inbox and answers what needs an answer.
+export async function answerMessages(page: Page, inbox: Inbox, runId: number, profile: Profile): Promise<AnswerResult> {
+  let recheckAt: number | null = null;
   const remainingToday = replyConfig.maxPerDay - repliesSince(startOfToday());
   if (remainingToday <= 0) {
     log(`Daily limit of ${replyConfig.maxPerDay} replies reached.`);
-    return 0;
+    return { replied: 0, recheckAt };
   }
   const limit = Math.min(replyConfig.maxPerCheck, remainingToday);
 
@@ -362,8 +369,12 @@ export async function answerMessages(page: Page, inbox: Inbox, runId: number, pr
     // need nothing are skipped without opening them.
     const known = threadMessages(inbox, c.threadId).at(-1);
     if (known && (isMessageHandled(known.key) || known.senderUrn === inbox.me)) continue;
-    // They may still be typing more messages; answer them together on a later check.
-    if (known && Date.now() - known.deliveredAt < replyConfig.quietSec * 1_000) continue;
+    // They may still be typing more messages; answer them together once they are quiet.
+    const quietUntil = (known?.deliveredAt ?? 0) + replyConfig.quietSec * 1_000;
+    if (known && Date.now() < quietUntil) {
+      recheckAt = Math.min(recheckAt ?? Infinity, quietUntil + 500);
+      continue;
+    }
 
     try {
       await openThread(page, c);
@@ -402,5 +413,5 @@ export async function answerMessages(page: Page, inbox: Inbox, runId: number, pr
     if (wasUnread && !sent) await markUnread(page, label);
     await sleep(randomInt(1_000, 2_500));
   }
-  return replied;
+  return { replied, recheckAt };
 }

@@ -2,8 +2,10 @@
 
 A bot that runs on your own LinkedIn account, on your Mac. While it runs, it:
 
-- **accepts incoming connection requests**, checking every 30–60 seconds
-- **answers direct messages** with a short reply that fits the conversation, checking every 10–20 seconds. Claude reads the thread, including attachment names and images, and writes the reply.
+- **accepts incoming connection requests** as soon as they arrive
+- **answers direct messages** as soon as they arrive, with a short reply that fits the conversation. Claude reads the thread, including attachment names and images, and writes the reply.
+
+It reacts within seconds because it listens to LinkedIn's own realtime channel: the page keeps a server-sent event stream (`/realtime/connect`) open, and LinkedIn pushes `messagesTopic`, `conversationsTopic` and `invitationsTopic` events on it. The bot reads that stream through the Chrome DevTools Protocol and starts a check on each event. Timed checks (messages every 30–60 s, invitations every 60–120 s) catch anything the stream misses.
 
 LinkedIn has no public API for this, so the bot drives your installed Google Chrome with [Playwright](https://playwright.dev), using a separate Chrome profile that you sign in to once by hand. It finds unread conversations and message contents by reading the data LinkedIn's own messaging page loads (the `messengerConversations` / `messengerMessages` GraphQL responses), not by scraping text, so layout changes break it less.
 
@@ -47,6 +49,7 @@ If LinkedIn shows a security check, the bot stops and creates `~/.linkedin-bot/S
 
 ```
 src/watch/    npm start: the main loop (one Chrome, one tab for invitations, one for messages)
+              and the realtime listener (realtime.ts)
 src/accept/   accepting invitations
 src/reply/    reading the inbox (reply.ts), writing the reply with Claude (draft.ts)
 src/profile/  the name/age/location prompt
@@ -73,8 +76,8 @@ All state lives outside the repo in `~/.linkedin-bot/`: the Chrome profile, `bot
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | none | Required |
 | `REPLY_MODEL` | `claude-opus-5-5` | Model that writes replies |
-| `REPLY_CHECK_MIN_SEC` / `REPLY_CHECK_MAX_SEC` | `10` / `20` | Inbox check interval |
-| `ACCEPT_CHECK_MIN_SEC` / `ACCEPT_CHECK_MAX_SEC` | `30` / `60` | Invitation check interval |
+| `REPLY_CHECK_MIN_SEC` / `REPLY_CHECK_MAX_SEC` | `30` / `60` | Fallback inbox check interval |
+| `ACCEPT_CHECK_MIN_SEC` / `ACCEPT_CHECK_MAX_SEC` | `60` / `120` | Fallback invitation check interval |
 | `REPLY_QUIET_SEC` | `12` | Quiet time before answering a burst of messages |
 | `REPLY_CONTEXT_MESSAGES` | `30` | Latest messages the model sees |
 | `MAX_REPLIES_PER_DAY` | `300` | Safety cap |
